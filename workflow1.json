@@ -1,0 +1,390 @@
+[
+  {
+    "name": "sys_infra_diag_full_v1",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "infra/diag/full",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          240,
+          300
+        ],
+        "id": "a1111111-1111-4111-8111-111111111111",
+        "name": "sys_trg_webhook_infra_diag_full"
+      },
+      {
+        "parameters": {
+          "language": "JavaScript",
+          "mode": "runOnceForAllItems",
+          "jsCode": "const body = $json.body ?? {};\n\nconst run_id = body.run_id ?? `diag_${Date.now()}_${Math.random().toString(16).slice(2)}`;\nconst started_at = new Date().toISOString();\nconst started_ms = Date.now();\n\nconst minioHealthUrl = body.minioHealthUrl ?? 'http://minio:9000/minio/health/live';\n\nreturn [{\n  json: {\n    run_id,\n    started_at,\n    started_ms,\n    minioHealthUrl,\n    env: {\n      EXECUTIONS_MODE: $env.EXECUTIONS_MODE ?? null,\n      QUEUE_HEALTH_CHECK_ACTIVE: $env.QUEUE_HEALTH_CHECK_ACTIVE ?? null,\n      DB_TYPE: $env.DB_TYPE ?? null,\n      DB_POSTGRESDB_HOST: $env.DB_POSTGRESDB_HOST ?? null,\n      QUEUE_BULL_REDIS_HOST: $env.QUEUE_BULL_REDIS_HOST ?? null,\n      N8N_RUNNERS_MODE: $env.N8N_RUNNERS_MODE ?? null\n    }\n  }\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          520,
+          300
+        ],
+        "id": "b2222222-2222-4222-8222-222222222222",
+        "name": "sys_cfg_init"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT 1 AS ok, current_database() AS db, now() AS ts;"
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          820,
+          140
+        ],
+        "id": "c3333333-3333-4333-8333-333333333333",
+        "name": "sys_pg_exec_query",
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "language": "JavaScript",
+          "mode": "runOnceForAllItems",
+          "jsCode": "const cfg = $('sys_cfg_init').first().json;\nconst items = $input.all();\n\n// Postgres node costuma retornar 1+ itens (linhas). Aqui pegamos a primeira linha.\nconst first = items[0]?.json ?? {};\n\n// Em continueOnFail, alguns nodes expõem erro em diferentes chaves.\nconst err = first.error ?? first.message ?? first.cause ?? null;\n\nconst ok = err ? false : (first.ok === 1 || first.ok === true || first.ok === '1');\n\nreturn [{\n  json: {\n    check: 'postgres',\n    ok,\n    db: first.db ?? null,\n    ts: first.ts ?? null,\n    error: err,\n    run_id: cfg.run_id\n  }\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1060,
+          140
+        ],
+        "id": "d4444444-4444-4444-8444-444444444444",
+        "name": "sys_pg_normalize"
+      },
+      {
+        "parameters": {
+          "operation": "info"
+        },
+        "type": "n8n-nodes-base.redis",
+        "typeVersion": 1,
+        "position": [
+          820,
+          300
+        ],
+        "id": "e5555555-5555-4555-8555-555555555555",
+        "name": "sys_redis_info",
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "language": "JavaScript",
+          "mode": "runOnceForAllItems",
+          "jsCode": "const cfg = $('sys_cfg_init').first().json;\nconst first = $input.first().json ?? {};\n\nconst err = first.error ?? first.message ?? first.cause ?? null;\n\n// Se veio algum objeto de info sem erro, consideramos ok.\nconst ok = !err && Object.keys(first).length > 0;\n\nreturn [{\n  json: {\n    check: 'redis',\n    ok,\n    info_keys: ok ? Object.keys(first).slice(0, 20) : [],\n    error: err,\n    run_id: cfg.run_id\n  }\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1060,
+          300
+        ],
+        "id": "f6666666-6666-4666-8666-666666666666",
+        "name": "sys_redis_normalize"
+      },
+      {
+        "parameters": {
+          "method": "GET",
+          "url": "={{$('sys_cfg_init').first().json.minioHealthUrl}}",
+          "options": {
+            "timeout": 8000
+          },
+          "responseFormat": "string"
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4,
+        "position": [
+          820,
+          460
+        ],
+        "id": "a7777777-7777-4777-8777-777777777777",
+        "name": "sys_minio_health_live",
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "language": "JavaScript",
+          "mode": "runOnceForAllItems",
+          "jsCode": "const cfg = $('sys_cfg_init').first().json;\nconst first = $input.first().json ?? {};\n\nconst statusCode = first.statusCode ?? first.status ?? null;\nconst err = first.error ?? first.message ?? first.cause ?? null;\n\nconst ok = !err && statusCode === 200;\n\nreturn [{\n  json: {\n    check: 'minio_health',\n    ok,\n    statusCode,\n    error: err,\n    url: cfg.minioHealthUrl,\n    run_id: cfg.run_id\n  }\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1060,
+          460
+        ],
+        "id": "b8888888-8888-4888-8888-888888888888",
+        "name": "sys_minio_normalize"
+      },
+      {
+        "parameters": {
+          "language": "Python",
+          "mode": "runOnceForAllItems",
+          "pythonCode": "import time, hashlib\n\npayload = b\"n8n-runners-diag\"\nsha = hashlib.sha256(payload).hexdigest()\n\nreturn [{\n  \"json\": {\n    \"check\": \"python_runner\",\n    \"ok\": True,\n    \"sha256\": sha,\n    \"ts\": time.time()\n  }\n}]"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          820,
+          620
+        ],
+        "id": "c9999999-9999-4999-8999-999999999999",
+        "name": "sys_python_runner_check",
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "mode": "append"
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 2,
+        "position": [
+          1320,
+          220
+        ],
+        "id": "d0000000-0000-4000-8000-000000000001",
+        "name": "sys_merge_pg_redis"
+      },
+      {
+        "parameters": {
+          "mode": "append"
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 2,
+        "position": [
+          1560,
+          340
+        ],
+        "id": "d0000000-0000-4000-8000-000000000002",
+        "name": "sys_merge_plus_minio"
+      },
+      {
+        "parameters": {
+          "mode": "append"
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 2,
+        "position": [
+          1800,
+          500
+        ],
+        "id": "d0000000-0000-4000-8000-000000000003",
+        "name": "sys_merge_plus_python"
+      },
+      {
+        "parameters": {
+          "language": "JavaScript",
+          "mode": "runOnceForAllItems",
+          "jsCode": "const cfg = $('sys_cfg_init').first().json;\nconst results = $input.all().map(i => i.json);\n\nconst ok = results.every(r => r.ok === true);\nconst duration_ms = Date.now() - (cfg.started_ms ?? Date.now());\n\nreturn [{\n  json: {\n    ok,\n    run_id: cfg.run_id,\n    started_at: cfg.started_at,\n    duration_ms,\n    env: cfg.env,\n    results\n  }\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2040,
+          500
+        ],
+        "id": "d0000000-0000-4000-8000-000000000004",
+        "name": "sys_build_report"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{$json}}",
+          "options": {
+            "responseCode": 200,
+            "responseHeaders": {
+              "entries": [
+                {
+                  "name": "Content-Type",
+                  "value": "application/json"
+                }
+              ]
+            }
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          2280,
+          500
+        ],
+        "id": "d0000000-0000-4000-8000-000000000005",
+        "name": "sys_http_respond"
+      }
+    ],
+    "connections": {
+      "sys_trg_webhook_infra_diag_full": {
+        "main": [
+          [
+            {
+              "node": "sys_cfg_init",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_cfg_init": {
+        "main": [
+          [
+            {
+              "node": "sys_pg_exec_query",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "sys_redis_info",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "sys_minio_health_live",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "sys_python_runner_check",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_pg_exec_query": {
+        "main": [
+          [
+            {
+              "node": "sys_pg_normalize",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_redis_info": {
+        "main": [
+          [
+            {
+              "node": "sys_redis_normalize",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_minio_health_live": {
+        "main": [
+          [
+            {
+              "node": "sys_minio_normalize",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_pg_normalize": {
+        "main": [
+          [
+            {
+              "node": "sys_merge_pg_redis",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_redis_normalize": {
+        "main": [
+          [
+            {
+              "node": "sys_merge_pg_redis",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "sys_merge_pg_redis": {
+        "main": [
+          [
+            {
+              "node": "sys_merge_plus_minio",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_minio_normalize": {
+        "main": [
+          [
+            {
+              "node": "sys_merge_plus_minio",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "sys_merge_plus_minio": {
+        "main": [
+          [
+            {
+              "node": "sys_merge_plus_python",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_python_runner_check": {
+        "main": [
+          [
+            {
+              "node": "sys_merge_plus_python",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "sys_merge_plus_python": {
+        "main": [
+          [
+            {
+              "node": "sys_build_report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "sys_build_report": {
+        "main": [
+          [
+            {
+              "node": "sys_http_respond",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "active": false,
+    "settings": {
+      "executionTimeout": 300
+    }
+  }
+]

@@ -1,0 +1,192 @@
+volumes:
+  db_storage:
+  n8n_storage:
+  redis_storage:
+  minio_storage:
+
+x-shared: &shared
+  restart: always
+  build:
+    context: .
+    dockerfile: Dockerfile
+  # image: docker.n8n.io/n8nio/n8n:2.9.0  ← comentar
+  environment:
+    # --- Postgres ---
+    - DB_TYPE=postgresdb
+    - DB_POSTGRESDB_HOST=postgres
+    - DB_POSTGRESDB_PORT=5432
+    - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+    - DB_POSTGRESDB_USER=${POSTGRES_NON_ROOT_USER}
+    - DB_POSTGRESDB_PASSWORD=${POSTGRES_NON_ROOT_PASSWORD}
+
+    # --- Queue mode (Redis) ---
+    - EXECUTIONS_MODE=queue
+    - QUEUE_BULL_REDIS_HOST=redis
+    - QUEUE_BULL_REDIS_PORT=6379
+    - QUEUE_BULL_REDIS_DB=0
+    - QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD=10000
+    - QUEUE_HEALTH_CHECK_ACTIVE=true
+    - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+
+    # --- n8n core ---
+    - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+    - N8N_HOST=0.0.0.0
+    - N8N_PORT=5678                          # ← FIXO (não usar variável aqui!)
+    - N8N_PROTOCOL=http
+    - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
+    - WEBHOOK_URL=${WEBHOOK_URL}
+    - N8N_LOG_LEVEL=info
+
+    # --- Owner (criado no 1º boot, persiste no Postgres) ---
+    - N8N_OWNER_EMAIL=${N8N_OWNER_EMAIL}
+    - N8N_OWNER_PASSWORD=${N8N_OWNER_PASSWORD}
+    - N8N_OWNER_FIRST_NAME=${N8N_OWNER_FIRST_NAME}
+    - N8N_OWNER_LAST_NAME=${N8N_OWNER_LAST_NAME}
+    - N8N_PERSONALIZATION_ENABLED=false
+
+    # --- Binary data ---
+    - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+
+    # Python Task Runner — aponta para o venv criado no Dockerfile
+    - N8N_RUNNERS_PYTHON=/usr/local/lib/n8n-python-venv/bin/python3
+    # Python Task Runner (interno — modo debug/dev)
+    # - N8N_PYTHON_VENV=/usr/local/lib/n8n-python-venv
+    - N8N_RUNNERS_STDLIB_ALLOW=*
+    - N8N_RUNNERS_EXTERNAL_ALLOW=*
+
+
+    # Adicionar no x-shared (substitui N8N_RUNNERS_STDLIB_ALLOW e similares):
+    - N8N_RUNNERS_ENABLED=true
+    - N8N_RUNNERS_MODE=external
+    - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+    - N8N_RUNNERS_AUTH_TOKEN=${RUNNER_AUTH_TOKEN}
+
+    - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    # - N8N_RUNNERS_STDLIB_ALLOW=*
+    # - N8N_RUNNERS_EXTERNAL_ALLOW=*
+
+# Remover do x-shared (não mais necessários):
+    # - N8N_PYTHON_VENV=...
+    # - N8N_RUNNERS_STDLIB_ALLOW (mover para o runner abaixo)
+
+
+
+
+
+
+
+
+
+
+
+
+
+  volumes:
+    - n8n_storage:/home/node/.n8n
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    ports:
+      - "${POSTGRES_PORT_5432_TCP_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_NON_ROOT_USER=${POSTGRES_NON_ROOT_USER}
+      - POSTGRES_NON_ROOT_PASSWORD=${POSTGRES_NON_ROOT_PASSWORD}
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    restart: always
+    volumes:
+      - redis_storage:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: n8n-minio
+    restart: always
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    volumes:
+      - minio_storage:/data
+    ports:
+      - "${MINIO_PORT_HTTP}:9000"
+      - "${MINIO_PORT_CONSOLE}:9001"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio-init:                                   # ← NOVO
+    image: quay.io/minio/mc:latest
+    container_name: n8n-minio-init
+    restart: on-failure
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY} &&
+        mc mb --ignore-existing local/n8n-files &&
+        echo '✅ Bucket n8n-files criado com sucesso'
+      "
+
+  n8n:
+    <<: *shared
+    container_name: n8n-main
+    ports:
+      - "${N8N_PORT_HTTP}:5678"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  n8n-worker:
+    <<: *shared
+    container_name: n8n-worker
+    command: worker
+    depends_on:
+      - n8n
+
+
+# Novo serviço no services:
+  n8n-runners:
+    image: n8nio/runners:latest
+    container_name: n8n-runners
+    restart: always
+    environment:
+      - N8N_RUNNERS_TASK_BROKER_URI=http://n8n-main:5679
+      - N8N_RUNNERS_AUTH_TOKEN=${RUNNER_AUTH_TOKEN}
+      - N8N_RUNNERS_STDLIB_ALLOW=*
+      - N8N_RUNNERS_EXTERNAL_ALLOW=*
+    depends_on:
+      - n8n
+
